@@ -1,0 +1,65 @@
+/* パスワードマネージャーのスタイル */
+
+.root {
+    -fx-background-color: #f4f4f4;
+}
+
+.label {
+    -fx-font-family: "MS Gothic", monospace;
+    -fx-font-size: 12px;
+}
+
+.button {
+    -fx-background-color: #4CAF50;
+    -fx-text-fill: white;
+    -fx-font-weight: bold;
+    -fx-background-radius: 3px;
+    -fx-padding: 8px 16px;
+}
+
+.button:hover {
+    -fx-background-color: #45a049;
+}
+
+.button:pressed {
+    -fx-background-color: #3d8b40;
+}
+
+.text-field, .password-field, .text-area {
+    -fx-background-color: white;
+    -fx-border-color: #ddd;
+    -fx-border-width: 1px;
+    -fx-background-radius: 3px;
+    -fx-border-radius: 3px;
+    -fx-padding: 5px;
+}
+
+.text-field:focused, .password-field:focused, .text-area:focused {
+    -fx-border-color: #4CAF50;
+    -fx-border-width: 2px;
+}
+
+.table-view {
+    -fx-background-color: white;
+    -fx-border-color: #ddd;
+    -fx-border-width: 1px;
+}
+
+.table-view .column-header {
+    -fx-background-color: #f0f0f0;
+    -fx-border-color: #ddd;
+    -fx-font-weight: bold;
+}
+
+.table-row-cell:selected {
+    -fx-background-color: #e8f5e8;
+}
+
+.split-pane {
+    -fx-background-color: #f4f4f4;
+}
+
+.split-pane > .split-pane-divider {
+    -fx-background-color: #ddd;
+    -fx-padding: 0 1 0 1;
+}
