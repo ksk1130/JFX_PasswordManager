@@ -53,8 +53,8 @@ JFX_PasswordManager/
 
 ## 前提条件
 
-- JDK 21
-- Windows 10/11（配布タスクは Windows 向けスクリプトを利用）
+- JDK 21（`jpackage` が利用可能なJDK）
+- Windows 10/11（app-image 配布は Windows 向け）
 
 ## ビルド方法
 
@@ -78,7 +78,24 @@ JFX_PasswordManager/
 ./gradlew :app:run
 ```
 
-アプリのメインクラスは `jp.euks.PasswordManager.App` です。
+アプリのメインクラスは `jp.euks.PasswordManager.Launcher` です。
+
+## JavaFX依存の方針（アーキテクチャ別）
+
+- ARM64 環境
+	- JavaFX は Maven から取得せず、JDK 同梱の `jmods` を使用します。
+	- `JAVA_HOME`（または実行中 Java）の `jmods` に以下が必要です。
+		- `javafx.base.jmod`
+		- `javafx.graphics.jmod`
+		- `javafx.controls.jmod`
+		- `javafx.fxml.jmod`
+	- 例: `C:/bin/jdk-21`
+
+- ARM64 以外（x64 など）
+	- JavaFX は Maven Central から依存取得します。
+
+補足:
+- ARM64 で JavaFX 同梱ではない JDK を使用すると、配布タスクでエラーになります。
 
 ## テスト実行
 
@@ -90,18 +107,21 @@ JFX_PasswordManager/
 ./gradlew test
 ```
 
-## 配布パッケージ作成（Windows）
+## 配布パッケージ作成（Windows / app-image 推奨）
 
-最小JRE同梱の配布ZIPを作成できます。
+インストール不要の app-image を作成し、生成された Exe を直接起動できます。
 
 ```bash
-.\gradlew.bat :app:createWindowsDistributionWithJRE
+.\gradlew.bat :app:createWindowsAppImage
 ```
 
 生成物:
 
-- `app/build/distribution/PasswordManager-Windows.zip`
-- 展開後: `run.bat` で起動
+- `app/build/distribution/PasswordManager/PasswordManager.exe`
+
+起動方法:
+
+- `PasswordManager.exe` をダブルクリック
 
 ## データ保存先
 
