@@ -15,6 +15,10 @@ repositories {
     mavenCentral()
 }
 
+def osArch = System.getProperty('os.arch', '').toLowerCase()
+def isArm64 = osArch.contains('aarch64') || osArch.contains('arm64')
+def javafxVersion = libs.versions.javafx.get()
+
 dependencies {
     // Use JUnit test framework.
     testImplementation libs.junit
@@ -24,10 +28,14 @@ dependencies {
     
     // H2 Database for embedded database
     implementation libs.h2
-    
-    // JavaFX Controls
-    implementation libs.javafx.controls
-    implementation libs.javafx.fxml
+
+    if (!isArm64) {
+        // ARM64以外はMavenからJavaFXを取得（win classifier）
+        implementation "org.openjfx:javafx-base:${javafxVersion}:win"
+        implementation "org.openjfx:javafx-graphics:${javafxVersion}:win"
+        implementation "org.openjfx:javafx-controls:${javafxVersion}:win"
+        implementation "org.openjfx:javafx-fxml:${javafxVersion}:win"
+    }
     
     // Lombok for reducing boilerplate code
     compileOnly libs.lombok
@@ -48,15 +56,36 @@ java {
     }
 }
 
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+
+    if (isArm64) {
+        // ARM64はJavaFXをJDK同梱jmodsから解決する
+        // （MavenのJavaFXネイティブ依存を使わない）
+        def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
+        def jmodsDir = new File(javaHome, 'jmods')
+        options.compilerArgs += [
+            '--module-path', jmodsDir.absolutePath,
+            '--add-modules', 'javafx.controls,javafx.fxml'
+        ]
+    }
+}
+
 application {
     // Define the main class for the application.
-    mainClass = 'jp.euks.PasswordManager.App'
+    mainClass = 'jp.euks.PasswordManager.Launcher'
     
     // JavaFX実行のためのJVMオプション
-    applicationDefaultJvmArgs = [
-        '--add-opens', 'javafx.controls/javafx.scene.control.skin=ALL-UNNAMED',
-        '--add-opens', 'javafx.graphics/javafx.scene=ALL-UNNAMED'
-    ]
+    applicationDefaultJvmArgs = isArm64
+        ? [
+            '--add-modules', 'javafx.controls,javafx.fxml',
+            '--add-opens', 'javafx.controls/javafx.scene.control.skin=ALL-UNNAMED',
+            '--add-opens', 'javafx.graphics/javafx.scene=ALL-UNNAMED'
+        ]
+        : [
+            '--add-opens', 'javafx.controls/javafx.scene.control.skin=ALL-UNNAMED',
+            '--add-opens', 'javafx.graphics/javafx.scene=ALL-UNNAMED'
+        ]
 }
 
 // JREとライブラリを含めた配布用パッケージを作成
@@ -76,7 +105,11 @@ task createMinimalJRE {
         jreOutputDir.parentFile.mkdirs()
         
         // 必要なモジュール最小限セット
-        def modules = 'java.base,java.desktop,java.logging,java.sql,java.naming,jdk.unsupported,java.management'
+        // ARM64のみJavaFXモジュールを最小JREへ同梱
+        def baseModules = 'java.base,java.desktop,java.logging,java.sql,java.naming,java.xml,java.scripting,jdk.unsupported,java.management'
+        def modules = isArm64
+            ? "${baseModules},javafx.base,javafx.graphics,javafx.controls,javafx.fxml"
+            : baseModules
         
         logger.lifecycle("Creating minimal JRE with jlink...")
         logger.lifecycle("Modules: ${modules}")
@@ -89,6 +122,15 @@ task createMinimalJRE {
         def jmodsPath = new File(javaHome, 'jmods')
         if (!jmodsPath.exists()) {
             throw new GradleException("jmods directory not found at: ${jmodsPath.absolutePath}")
+        }
+
+        if (isArm64) {
+            // ARM64時はJDK側にJavaFX jmodがあることを必須チェック
+            ['javafx.base.jmod', 'javafx.graphics.jmod', 'javafx.controls.jmod', 'javafx.fxml.jmod'].each { jmodName ->
+                if (!new File(jmodsPath, jmodName).exists()) {
+                    throw new GradleException("JavaFX jmod not found: ${new File(jmodsPath, jmodName).absolutePath}. Use a JavaFX-bundled JDK such as C:/bin/jdk-21")
+                }
+            }
         }
         
         logger.lifecycle("Using jmods from: ${jmodsPath.absolutePath}")
@@ -110,150 +152,105 @@ task createMinimalJRE {
     }
 }
 
-task createWindowsDistributionWithJRE {
-    description = 'Create Windows distribution with minimal embedded JRE'
+// jpackage用の入力ディレクトリを準備
+task prepareJPackageInput {
+    description = 'Prepare input directory for jpackage'
     group = 'distribution'
-    dependsOn 'build', 'createMinimalJRE'
+    dependsOn 'jar'
     doLast {
         def buildDirPath = project.buildDir.absolutePath
-        def distDir = new File("$buildDirPath/distribution/PasswordManager")
-        def jreSourceDir = new File("$buildDirPath/jre-minimal")
-        def jreDestDir = new File("$distDir/jre")
-        
-        distDir.mkdirs()
-        
-        // JARファイルをコピー
-        logger.lifecycle("Copying application JAR...")
+        def packageInputDir = new File("$buildDirPath/package-input")
+
+        if (packageInputDir.exists()) {
+            packageInputDir.deleteDir()
+        }
+        packageInputDir.mkdirs()
+
+        logger.lifecycle("Copying application JAR for jpackage...")
         copy {
             from jar.archiveFile
-            into "${distDir.absolutePath}/lib"
+            into packageInputDir.absolutePath
         }
-        
-        // 依存ライブラリをコピー
-        logger.lifecycle("Copying dependencies...")
+
+        logger.lifecycle("Copying runtime dependencies for jpackage...")
         copy {
             from configurations.runtimeClasspath
-            into "${distDir.absolutePath}/lib"
+            into packageInputDir.absolutePath
         }
-        
-        // JREをコピー
-        logger.lifecycle("Copying minimal JRE...")
-        copy {
-            from jreSourceDir
-            into jreDestDir.absolutePath
+
+        logger.lifecycle("✓ jpackage input prepared: ${packageInputDir.absolutePath}")
+    }
+}
+
+// jpackageでWindows向けapp-image（EXE直接起動）を作成
+task createWindowsAppImage {
+    description = 'Create Windows app-image with EXE launcher (no installer)'
+    group = 'distribution'
+    dependsOn 'build', 'createMinimalJRE', 'prepareJPackageInput'
+    doLast {
+        def buildDirPath = project.buildDir.absolutePath
+        def packageInputDir = new File("$buildDirPath/package-input")
+        def jreOutputDir = new File("$buildDirPath/jre-minimal")
+        def distributionDir = new File("$buildDirPath/distribution")
+        def appImageDir = new File("$buildDirPath/distribution/PasswordManager")
+
+        distributionDir.mkdirs()
+
+        if (appImageDir.exists()) {
+            logger.lifecycle("Removing existing app-image directory: ${appImageDir.absolutePath}")
+            appImageDir.deleteDir()
         }
-        
-        // スタンドアロン実行用バッチファイルを作成
-        def runBat = new File(distDir, 'run.bat')
-        def runBatContent = '''@echo off
-setlocal enabledelayedexpansion
-set SCRIPT_DIR=%~dp0
-set JRE_HOME=%SCRIPT_DIR%jre
-set LIB_DIR=%SCRIPT_DIR%lib
 
-REM ClassPathを構築
-set CLASSPATH=
-for /r "%LIB_DIR%" %%f in (*.jar) do (
-    set CLASSPATH=!CLASSPATH!;%%f
-)
+        def javaHome = System.getenv('JAVA_HOME') ?: System.getProperty('java.home')
+        if (!javaHome) {
+            throw new GradleException('JAVA_HOME environment variable not set')
+        }
 
-REM JavaFXオプション
-set JVM_OPTS=--add-opens javafx.controls/javafx.scene.control.skin=ALL-UNNAMED --add-opens javafx.graphics/javafx.scene=ALL-UNNAMED
+        def jpackageExe = new File(javaHome, 'bin/jpackage.exe')
+        if (!jpackageExe.exists()) {
+            throw new GradleException("jpackage.exe not found at: ${jpackageExe.absolutePath}")
+        }
 
-REM アプリケーション実行
-"%JRE_HOME%\\bin\\java.exe" %JVM_OPTS% -cp "%CLASSPATH%" jp.euks.PasswordManager.App
+        def mainJarName = jar.archiveFileName.get()
 
-endlocal
-'''
-        runBat.text = runBatContent
-        
-        // READMEを作成
-        def readmeFile = new File(distDir, 'README.txt')
-        def timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
-        def readmeContent = """
-PasswordManager - Windows版 (最小限JRE同梱)
-=============================================
+        logger.lifecycle('Creating Windows app-image with jpackage...')
+        logger.lifecycle("Using jpackage: ${jpackageExe.absolutePath}")
+        logger.lifecycle("Input directory: ${packageInputDir.absolutePath}")
+        logger.lifecycle("Runtime image: ${jreOutputDir.absolutePath}")
 
-■ 機能
-- パスワードの暗号化保存
-- CSVインポート・エクスポート
-- 重複エントリーの自動検出・削除
-
-■ 実行方法
-1. run.bat をダブルクリック
-   または
-   コマンドプロンプトから: run.bat
-
-■ ディレクトリ構成
-PasswordManager/
-  ├── jre/              - Java実行環境（最小限JRE）
-  ├── lib/              - アプリケーション及び依存ライブラリ
-  ├── run.bat           - 実行ファイル（推奨）
-  └── README.txt        - このファイル
-
-■ 動作環境
-- OS: Windows 7以上
-- その他: すべてのランタイムが同梱されています
-
-■ トラブルシューティング
-「run.bat は認識されていません」と表示される場合:
-  - run.bat があるディレクトリで右クリック → コマンドプロンプトを開く
-  - run.bat と入力して実行
-
-アプリが起動しない場合:
-  - jre\\bin\\java.exe が存在するか確認
-  - lib フォルダに .jar ファイルが複数存在するか確認
-
-■ セキュリティ
-- パスワードはAES-128で暗号化されています
-- データベースはローカルに保存されます
-
-■ パッケージについて
-このパッケージは jlink で生成された最小限のJREを含んでいます。
-フットプリント削減のため、以下のモジュールのみを含みます:
-  - java.base: Java基本モジュール
-  - java.desktop: UI関連
-  - java.logging: ログ機能
-  - java.sql: データベース
-  - java.naming: JNDI機能
-  - jdk.unsupported: 互換性
-  - java.management: 管理機能
-
-Version: 1.0
-Created: ${timestamp}
-"""
-        readmeFile.text = readmeContent
-        
-        // ZIPファイルを作成
-        def zipFile = new File("$buildDirPath/distribution/PasswordManager-Windows.zip")
-        
-        logger.lifecycle("Creating ZIP archive...")
         project.exec {
-            executable 'powershell.exe'
-            args '-NoProfile', '-Command', 
-                "Compress-Archive -Path \"${distDir.absolutePath}\" -DestinationPath \"${zipFile.absolutePath}\" -Force"
+            executable jpackageExe.absolutePath
+            def packageArgs = [
+                '--type', 'app-image',
+                '--name', 'PasswordManager',
+                '--dest', distributionDir.absolutePath,
+                '--input', packageInputDir.absolutePath,
+                '--main-jar', mainJarName,
+                '--main-class', 'jp.euks.PasswordManager.Launcher',
+                '--runtime-image', jreOutputDir.absolutePath,
+                '--java-options', '--add-opens=javafx.controls/javafx.scene.control.skin=ALL-UNNAMED',
+                '--java-options', '--add-opens=javafx.graphics/javafx.scene=ALL-UNNAMED'
+            ]
+
+            if (isArm64) {
+                packageArgs.addAll(['--java-options', '--add-modules=javafx.controls,javafx.fxml'])
+            }
+
+            args packageArgs
         }
-        
-        def sizeInMB = (zipFile.size() / (1024*1024)).toInteger()
+
+        def launcherExe = new File(appImageDir, 'PasswordManager.exe')
+
+        if (!launcherExe.exists()) {
+            throw new GradleException("Launcher EXE not found: ${launcherExe.absolutePath}")
+        }
+
         logger.lifecycle("""
 ========================================
-✓ Windows配布パッケージ作成完了
+✓ Windows app-image作成完了
 ========================================
-パッケージ: ${zipFile.absolutePath}
-
-内容:
-  - Application JAR
-  - すべての依存ライブラリ
-  - 最小限Java実行環境（jlink生成）
-  - 実行スクリプト（run.bat）
-  - ドキュメント
-
-利用方法:
-  1. ZIPファイルを解凍
-  2. run.bat をダブルクリック
-  3. アプリケーション起動
-
-パッケージサイズ: ${sizeInMB} MB
+出力先: ${appImageDir.absolutePath}
+起動方法: PasswordManager.exe を実行
 ========================================
 """)
     }
@@ -265,15 +262,17 @@ task printDistributionInfo {
     doLast {
         println """
 配布用パッケージ作成タスク:
-  gradle createWindowsDistributionWithJRE : Windows用パッケージ作成（最小限JRE同梱）
+    gradle createWindowsAppImage : Windows app-image作成（EXE直接起動）
 
 実行例:
-  gradle createWindowsDistributionWithJRE
+    gradle createWindowsAppImage
 
 出力先:
-  build/distribution/PasswordManager-Windows.zip
+    build/distribution/PasswordManager/PasswordManager.exe
 
 特徴:
+    - jpackage(app-image)でEXEランチャーを生成
+    - インストーラ不要で直接起動可能
   - jlink で生成された最小限のJRE
   - 不要なモジュール/ドキュメントを除外
   - --compress=2 で圧縮
